@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""只通过IPC访问robotd。显示刷新5Hz，与电机控制周期无关。"""
+import os
+import io
+import socket
+import sys
+import time
+
+
+def query(command):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as client:
+        client.settimeout(2)
+        client.connect('/tmp/microduck-%d/robot.sock' % os.getuid())
+        client.sendall(command.encode())
+        return client.recv(16384).decode()
+
+
+def color(text, code):
+    # 重定向到文件时不写入颜色控制字符。
+    return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
+
+
+def display(reply, selected=None, output=sys.stdout):
+    def write(*parts):
+        output.write(" ".join(parts) + "\n")
+    lines = reply.splitlines()
+    summary = dict(item.split('=', 1) for item in lines[0].split())
+    rows = [dict(item.split('=', 1) for item in line.split()) for line in lines[1:]]
+    fault = summary['bus_fault'] != '0'
+    write(color('总线故障' if fault else '总线正常', '31' if fault else '32'),
+          f"  设定周期20ms | 轮数 {summary['rounds']} | 超期 {summary['overruns']}")
+    if selected is not None:
+        row = next(row for row in rows if row['id'] == selected)
+        write(f"电机 {selected} 详情（离线时数值可能为旧值；age_ms=-1表示从未收到反馈）")
+        # 详情保留全部原始字段名，便于对照协议和诊断代码。
+        for key, value in row.items():
+            write(f"  {key:<18} {value}")
+        return
+    write(' ID  状态  模式    位置(度)  转子速度  电压  壳温  年龄ms')
+    offline = []
+    for row in rows:
+        if row['online'] != '1':
+            offline.append(row['id'])
+            continue
+        bad = any(row[key] != '0' for key in ('error', 'warning', 'timeout_flag'))
+        state = '异常' if bad else '在线'
+        mode = {'0': '锁定', '1': 'FOC '}.get(row['rx_mode'], '未知')
+        text = (f"{int(row['id']):3d}  {state}  {mode}  "
+                f"{float(row['position_deg']):10.2f}  {float(row['speed']):8.2f}  "
+                f"{float(row['voltage']):4.1f}  {int(row['case_temp']):4d}  {int(row['age_ms']):6d}")
+        write(color(text, '31' if bad else '32'))
+        if bad:
+            write(color(f"     错误={row['error']} 警告={row['warning']} 超时标志={row['timeout_flag']}", '31'))
+    if offline:
+        write(color('离线/无新鲜反馈：' + ', '.join(offline), '90'))
+    write('位置采用position_deg；速度rad/s，电压V，壳温℃。')
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args == ['--help']:
+        print('用法：robotctl status [ID] | watch | raw-status')
+        print('      robotctl lock-all | lock ID | clear-timeout ID | position ID DEGREES')
+        print('      robotctl mit ID POSITION VELOCITY KP KD TORQUE DURATION_MS')
+        return 0
+    if args[0] in ('status', 'watch', 'raw-status'):
+        if args[0] == 'status':
+            if len(args) > 2 or (len(args) == 2 and args[1] not in [str(i) for i in range(15)]):
+                sys.exit('用法：robotctl status [0..14]')
+        elif len(args) != 1:
+            sys.exit('watch和raw-status不接受参数')
+        watching = args[0] == 'watch'
+        if watching and not sys.stdout.isatty():
+            sys.exit('watch需要交互终端；保存数据请使用raw-status')
+        try:
+            if watching:
+                # 切换备用屏幕，退出恢复原终端内容和光标。
+                print('\033[?1049h\033[?25l', end='', flush=True)
+            while True:
+                reply = query('status')
+                if reply.startswith('ERR'):
+                    sys.exit(reply)
+                if watching:
+                    # 先在内存生成整帧；不清空旧画面，覆盖后只清理行尾和多余旧行。
+                    frame = io.StringIO()
+                    display(reply, output=frame)
+                    frame.write('每0.05秒刷新；Ctrl+C仅退出查看，不停止电机。')
+                    sys.stdout.write('\033[H' + '\033[K\n'.join(frame.getvalue().splitlines()) + '\033[J')
+                    sys.stdout.flush()
+                elif args[0] == 'raw-status':
+                    print(reply, end='' if reply.endswith('\n') else '\n')
+                else:
+                    display(reply, args[1] if len(args) == 2 else None)
+                if not watching:
+                    break
+                time.sleep(0.05)
+        finally:
+            if watching:
+                print('\033[?25h\033[?1049l', end='', flush=True)
+        return 0
+    reply = query(' '.join(args))
+    print(color(reply, '31' if reply.startswith('ERR') else '32'))
+    return 1 if reply.startswith('ERR') else 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        pass
+    except OSError as error:
+        sys.exit('无法访问robotd: %s' % error)

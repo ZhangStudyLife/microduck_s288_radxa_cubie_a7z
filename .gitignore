@@ -1,0 +1,50 @@
+# 用户主目录中的账号配置、凭据、缓存和远程开发环境，不纳入版本控制。
+/.*
+!/.gitignore
+!/.gitattributes
+!/.editorconfig
+!/.github/
+
+# 项目私有配置与凭据（需要共享时提交不含秘密的示例文件）。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 依赖环境与缓存；源码、requirements和锁文件应提交。
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+node_modules/
+.pytest_cache/
+
+# 编译产物。
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.a
+*.so
+*.so.*
+/s288/serial_test
+/s288/serial_test.new
+
+# 运行日志和进程记录。不要忽略所有CSV，避免隐藏测试输入数据。
+logs/
+*.log
+*.pid
+s288_log_*.csv
+
+# 编辑器临时文件与系统镜像。
+*.swp
+*.swo
+*~
+*.img
+*.img.gz
+*.img.xz
+*.iso
+
+/control/robotd
