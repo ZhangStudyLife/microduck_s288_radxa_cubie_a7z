@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""只通过IPC访问robotd。显示刷新5Hz，与电机控制周期无关。"""
+"""只通过IPC访问robotd。显示刷新约20Hz，与电机控制周期无关。"""
 import os
 import io
 import socket
@@ -31,38 +31,109 @@ def display(reply, selected=None, output=sys.stdout):
           f"  设定周期20ms | 轮数 {summary['rounds']} | 超期 {summary['overruns']}")
     if selected is not None:
         row = next(row for row in rows if row['id'] == selected)
-        write(f"电机 {selected} 详情（离线时数值可能为旧值；age_ms=-1表示从未收到反馈）")
+        write(f"电机 {selected} 详情（离线时数值可能为旧值；age_ms=-1表示无当前有效反馈）")
         # 详情保留全部原始字段名，便于对照协议和诊断代码。
         for key, value in row.items():
             write(f"  {key:<18} {value}")
         return
-    write(' ID  状态  模式    位置(度)  转子速度  电压  壳温  年龄ms')
+    write(' ID  关节          主机使能  电机模式  机械角°  目标角°  壳温')
     offline = []
     for row in rows:
-        if row['online'] != '1':
+        if row['online'] != '1' and row['enabled'] != '1' and row['calibrating'] == '0':
             offline.append(row['id'])
             continue
-        bad = any(row[key] != '0' for key in ('error', 'warning', 'timeout_flag'))
-        state = '异常' if bad else '在线'
-        mode = {'0': '锁定', '1': 'FOC '}.get(row['rx_mode'], '未知')
-        text = (f"{int(row['id']):3d}  {state}  {mode}  "
-                f"{float(row['position_deg']):10.2f}  {float(row['speed']):8.2f}  "
-                f"{float(row['voltage']):4.1f}  {int(row['case_temp']):4d}  {int(row['age_ms']):6d}")
-        write(color(text, '31' if bad else '32'))
+        name = '右脚踝        ' if row['name'] == 'right_ankle' else f"{row['name']:<14}"
+        angle = f"{float(row['joint_deg']):8.2f}" if row['calibrated'] == '1' else '      --'
+        target = f"{float(row['target_deg']):8.2f}" if row['calibrated'] == '1' and row['reference'] == '1' else '      --'
+        enabled = '是' if row['enabled'] == '1' else '否'
+        mode = row['rx_mode'] if row['online'] == '1' else '离线'
+        bad = row['error'] != '0' or row['warning'] != '0' or row['timeout_flag'] != '0'
+        write(color(f"{int(row['id']):3d}  {name} {enabled:^6} {mode:^8} {angle} {target} {int(row['case_temp']):4d}", '33' if bad else '32'))
         if bad:
-            write(color(f"     错误={row['error']} 警告={row['warning']} 超时标志={row['timeout_flag']}", '31'))
+            write(f"     电机报告：error={row['error']} warning={row['warning']} timeout={row['timeout_flag']}（主机使能意图不变）")
+        if row['calibrating'] != '0':
+            write('     标定步骤：' + row['calibrating'])
     if offline:
-        write(color('离线/无新鲜反馈：' + ', '.join(offline), '90'))
-    write('位置采用position_deg；速度rad/s，电压V，壳温℃。')
+        write(color('离线且未使能：' + ', '.join(offline), '90'))
+    write('主机使能与电机模式分开显示；模式0锁定、1为FOC。未标定不显示机械角。')
+
+
+def calibrate(name=None):
+    """四次手动采样；回中通过后由robotd自动保存，不额外发送运动指令。"""
+    if name is None:
+        reply = query('status')
+        if reply.startswith('ERR'):
+            sys.exit(reply)
+        for line in reply.splitlines()[1:]:
+            row = dict(item.split('=', 1) for item in line.split())
+            print(f"ID={row['id']} {row['name']} 在线={row['online']}")
+        name = input('选择舵机名称或ID：').strip()
+    print('标定：机械零点 → 远端（正方向）→ 近端 → 回中±5°，通过后自动保存。')
+    print('进入标定会取消该舵机的位置控制，继续模式0查询；模式0是锁定，不是撤力。')
+    print('请支撑机构并手动摆位；程序不自动寻找端点，也不自动扣除角度余量。')
+    reply = query(f'joint calibrate {name} begin')
+    print(reply)
+    if reply.startswith('ERR'):
+        return 1
+    saved = False
+    try:
+        for action, prompt in [
+            ('zero', '摆到机械零点'), ('upper', '摆到远端（定义为正方向）'),
+            ('lower', '摆到近端'), ('center', '回到第一次记录的机械零点，允许±5°')]:
+            while True:
+                input(prompt + '，回车采样（Ctrl+C取消）：')
+                reply = query(f'joint calibrate {name} {action}')
+                print(reply)
+                if not reply.startswith('ERR'):
+                    break
+                print('本步未完成，可调整后重试；前面的采样保留。')
+        saved = True
+        return 0
+    finally:
+        if not saved:
+            try:
+                query(f'joint calibrate {name} cancel')
+            except OSError:
+                pass
+
 
 
 def main():
     args = sys.argv[1:]
     if not args or args == ['--help']:
         print('用法：robotctl status [ID] | watch | raw-status')
-        print('      robotctl lock-all | lock ID | clear-timeout ID | position ID DEGREES')
-        print('      robotctl mit ID POSITION VELOCITY KP KD TORQUE DURATION_MS')
+        print('      robotctl joints | joint status/arm/home/stop NAME | joint calibrate [NAME或ID]')
+        print('      robotctl joint params NAME [KP KD]（输出端单位，设置即保存）')
+        print('      robotctl joint move NAME DEGREES | lock-all | lock ID | clear-timeout ID')
+        print('arm保持当前位置；move覆盖目标，非法角度忽略；错误仅显示，stop主动停用。')
         return 0
+    if args == ['joints']:
+        reply = query('status')
+        if reply.startswith('ERR'):
+            sys.exit(reply)
+        for line in reply.splitlines()[1:]:
+            row = dict(item.split('=', 1) for item in line.split())
+            limits = f"[{row['min_deg']}, {row['max_deg']}]°" if row['calibrated'] == '1' else '未标定'
+            print(f"ID={row['id']} {row['name']} calibrated={row['calibrated']} "
+                  f"enabled={row['enabled']} online={row['online']} limits={limits}")
+        return 0
+    if args == ['joint', 'calibrate']:
+        return calibrate()
+    if len(args) == 3 and args[0] == 'joint':
+        if args[1] == 'calibrate':
+            return calibrate(args[2])
+        if args[1] == 'reference':
+            sys.exit('reference已移除；回中确认并入标定，日常直接执行 joint arm NAME')
+        elif args[1] == 'status':
+            reply = query('status')
+            if reply.startswith('ERR'):
+                sys.exit(reply)
+            for line in reply.splitlines()[1:]:
+                row = dict(item.split('=', 1) for item in line.split())
+                if args[2] in (row['name'], row['id']):
+                    display(reply, row['id'])
+                    return 0
+            sys.exit('未知关节')
     if args[0] in ('status', 'watch', 'raw-status'):
         if args[0] == 'status':
             if len(args) > 2 or (len(args) == 2 and args[1] not in [str(i) for i in range(15)]):
@@ -106,7 +177,11 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         pass
+    except ValueError as error:
+        sys.exit(str(error))
+    except FileNotFoundError:
+        sys.exit('无法连接robotd：通信入口不存在。请先 sudo systemctl start robotd')
     except OSError as error:
         sys.exit('无法访问robotd: %s' % error)
