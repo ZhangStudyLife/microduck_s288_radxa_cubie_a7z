@@ -81,3 +81,22 @@ S288_IDENTIFIED_KP_SDK=9.03e-5乘S288_M1_BAM_KP_SCALE=1.5；Kd=3.74e-6。
 绿色表示在线且错误、警告、超时标志均为0；红色表示异常；灰色表示离线或无新鲜反馈。
 颜色不表示温度已通过安全判断。位置为输出端position_deg，速度为转子端rad/s。
 客户端仅使用Python标准库，无需安装依赖。文件重定向自动禁用颜色。
+
+
+## systemd服务（板上已安装，默认不启用开机自启）
+
+首次安装或修改unit后执行：
+```bash
+sudo install -m 644 /home/microduck/control/robotd.service /etc/systemd/system/robotd.service
+sudo systemctl daemon-reload
+```
+日常管理：
+```bash
+sudo systemctl start robotd
+systemctl status robotd --no-pager
+sudo journalctl -u robotd -n 30 --no-pager
+sudo systemctl stop robotd
+```
+服务以microduck运行，不自动重启；关闭SSH不影响服务。
+使用systemd时不要再手动启动另一个robotd，以免争用串口。
+停止服务会尽力锁定电机并释放串口，不等于断电撤力。

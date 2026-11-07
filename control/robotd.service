@@ -1,0 +1,18 @@
+[Unit]
+Description=S288 motor bus controller
+
+[Service]
+Type=simple
+User=microduck
+Group=microduck
+WorkingDirectory=/home/microduck/control
+ExecStart=/home/microduck/control/robotd /dev/ttyACM0
+# SIGTERM让robotd执行锁定和串口释放；不自动恢复运行。
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
